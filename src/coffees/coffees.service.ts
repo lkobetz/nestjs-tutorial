@@ -2,123 +2,81 @@
 
 // this file is generated with command: nest g s
 
-import { Injectable, HttpException, HttpStatus, NotFoundException, Inject, Scope, Request } from '@nestjs/common';
-import { Coffee } from './entities/coffee.entity';
-import { Flavor } from './entities/flavor.entity';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import { Connection, Model } from 'mongoose';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 import { Event } from '../events/entities/event.entity';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Connection } from 'typeorm';
 import { CreateCoffeeDto } from './dto/create-coffee.dto';
 import { UpdateCoffeeDto } from './dto/update-coffee.dto';
-import { PaginationQueryDto } from 'src/common/dto/pagination-query.dto';
-import { COFFEE_BRANDS } from './coffees.constants'
-import { REQUEST } from '@nestjs/core'
-import { ConfigService, ConfigType } from '@nestjs/config';
-import coffeesConfig from './config/coffees.config'
+import { Coffee } from './entities/coffee.entity';
 
-// @Injectable decorator marks the CoffeesService class as a Provider
 @Injectable()
 export class CoffeesService {
   constructor(
-    @InjectRepository(Coffee)
-    private readonly coffeeRepository: Repository<Coffee>,
-    @InjectRepository(Flavor)
-    private readonly flavorRepository: Repository<Flavor>,
-    // used for transactions:
-    private readonly connection: Connection,
-    // single argument to @Inject decorator is token that needs to be looked up
-    // @Inject(COFFEE_BRANDS) coffeeBrands: string[],
-    // @Inject(REQUEST) private request: Request, // injects the original request object if you need headers, cookies, IP addresses, etc. Note that request-scoped providers may have an impact on application performance because it has to create an instance for each request
-    @Inject(coffeesConfig.KEY)
-    private readonly coffeesConfiguration: ConfigType<typeof coffeesConfig>,
-    private readonly configService: ConfigService,
-  ) {
-  }
+    @InjectModel(Coffee.name) private readonly coffeeModel: Model<Coffee>,
+    @InjectConnection() private readonly connection: Connection,
+    @InjectModel(Event.name) private readonly eventModel: Model<Event>,
+  ) {}
 
   findAll(paginationQuery: PaginationQueryDto) {
     const { limit, offset } = paginationQuery;
-    return this.coffeeRepository.find({
-      // relations property is for eager loading associated tables
-      relations: ['flavors'],
-      skip: offset,
-      take: limit,
-    });
+    return this.coffeeModel
+      .find()
+      .skip(offset)
+      .limit(limit)
+      .exec();
   }
 
   async findOne(id: string) {
-    const coffee = await this.coffeeRepository.findOne(id, {
-      relations: ['flavors']
-    });
+    const coffee = await this.coffeeModel.findOne({ _id: id }).exec();
     if (!coffee) {
-      throw new NotFoundException(`Coffee ${id} not found!`)
-    } else return coffee;
+      throw new NotFoundException(`Coffee #${id} not found`);
+    }
+    return coffee;
   }
 
-  async create(createCoffeeDto: CreateCoffeeDto) {
-    const flavors = await Promise.all(
-      createCoffeeDto.flavors.map(name => this.preloadFlavorByName(name))
-    )
-    // 'create' method creates a Coffee class instance
-    const coffee = this.coffeeRepository.create({
-      ...createCoffeeDto,
-      flavors,
-    });
-    // 'save' method returns a promise, saves new entity to database
-    return this.coffeeRepository.save(coffee);
+  create(createCoffeeDto: CreateCoffeeDto) {
+    const coffee = new this.coffeeModel(createCoffeeDto);
+    return coffee.save();
   }
 
   async update(id: string, updateCoffeeDto: UpdateCoffeeDto) {
-    const flavors = updateCoffeeDto.flavors &&
-    (await Promise.all(
-      updateCoffeeDto.flavors.map(name => this.preloadFlavorByName(name))
-    ));
-    // preload creates a new entity based on object passed in, first looks for preexisting entity and replaces all its values with new values passed in here. Will return undefined if id doesn't exist in db
-    const coffee = await this.coffeeRepository.preload({
-      id: +id,
-      ...updateCoffeeDto,
-      flavors,
-    });
-    if (!coffee) {
-      throw new NotFoundException(`Coffee #${id} not found!`)
+    const existingCoffee = await this.coffeeModel
+      .findOneAndUpdate({ _id: id }, { $set: updateCoffeeDto }, { new: true })
+      .exec();
+
+    if (!existingCoffee) {
+      throw new NotFoundException(`Coffee #${id} not found`);
     }
-    return this.coffeeRepository.save(coffee)
+    return existingCoffee;
   }
 
   async remove(id: string) {
-    const coffee = await this.findOne(id)
-    return this.coffeeRepository.remove(coffee)
+    const coffee = await this.findOne(id);
+    return coffee.remove();
   }
 
   async recommendCoffee(coffee: Coffee) {
-    const queryRunner = this.connection.createQueryRunner();
-
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+    const session = await this.connection.startSession();
+    session.startTransaction();
 
     try {
       coffee.recommendations++;
 
-      const recommendEvent = new Event();
-      recommendEvent.name = 'recommend_coffee';
-      recommendEvent.type = 'coffee';
-      recommendEvent.payload = { coffeeId: coffee.id }
+      const recommendEvent = new this.eventModel({
+        name: 'recommend_coffee',
+        type: 'coffee',
+        payload: { coffeeId: coffee.id },
+      });
+      await recommendEvent.save({ session });
+      await coffee.save({ session });
 
-      await queryRunner.manager.save(coffee);
-      await queryRunner.manager.save(recommendEvent);
-
-      await queryRunner.commitTransaction();
-    } catch(err) {
-      await queryRunner.rollbackTransaction();
+      await session.commitTransaction();
+    } catch (err) {
+      await session.abortTransaction();
     } finally {
-      await queryRunner.release();
+      session.endSession();
     }
-  }
-
-  private async preloadFlavorByName(name: string): Promise<Flavor> {
-    const existingFlavor = await this.flavorRepository.findOne({name});
-    if (existingFlavor) {
-      return existingFlavor;
-    }
-    return this.flavorRepository.create({name})
   }
 }

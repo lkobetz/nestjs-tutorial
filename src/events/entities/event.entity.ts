@@ -1,21 +1,19 @@
 // this file was generated with command: nest g class events/entities/event.entity --no-spec
-import { Entity, PrimaryGeneratedColumn, Column, Index } from 'typeorm'
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import * as mongoose from 'mongoose';
 
-// indexing improves lookup speed, can be applied to the whole class or certain properties
-@Index(['name', 'type'])
-@Entity()
-export class Event {
-  @PrimaryGeneratedColumn()
-  id: number;
-
-  @Column()
+@Schema()
+export class Event extends mongoose.Document {  // Note "entity" was removed from the class "name"
+  @Prop()
   type: string;
 
-  // @Index decorator is optional, for speeding up performance
-  @Index()
-  @Column()
+  @Prop({index:true})
   name: string;
 
-  @Column('json')
-  payload: Record<string, any>
+  @Prop(mongoose.SchemaTypes.Mixed)
+  payload: Record<string, any>;
 }
+
+export const EventSchema = SchemaFactory.createForClass(Event);
+// 1: sort by ascending order, -1: sort by descending order
+EventSchema.index({ name: 1, type: -1 })
